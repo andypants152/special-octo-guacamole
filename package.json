@@ -1,0 +1,25 @@
+{
+  "name": "special-octo-guacamole",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andypants152/special-octo-guacamole.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/andypants152/special-octo-guacamole/issues"
+  },
+  "homepage": "https://github.com/andypants152/special-octo-guacamole#readme",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  }
+}
