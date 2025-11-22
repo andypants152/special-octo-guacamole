@@ -25,8 +25,6 @@ export class App {
     this.ctx = canvas.getContext("2d");
     this.baseWidth = BASE_WIDTH;
     this.baseHeight = BASE_HEIGHT;
-    this.canvas.width = BASE_WIDTH;
-    this.canvas.height = BASE_HEIGHT;
     this.width = BASE_WIDTH;
     this.height = BASE_HEIGHT;
     this.scale = 1;
@@ -68,40 +66,73 @@ export class App {
     this.connectWebSocket();
     this.attachEvents();
     window.addEventListener("resize", this.resizeCanvas);
+    if (window.DEBUG_LAYOUT === undefined) {
+      window.DEBUG_LAYOUT = false;
+    }
   }
 
   attachEvents() {
-    this.canvas.addEventListener("click", this.onCanvasClick);
-    this.canvas.addEventListener("mousedown", this.onPointerDown);
-    this.canvas.addEventListener("mousemove", this.onPointerMove);
-    this.canvas.addEventListener("mouseup", this.onPointerUp);
-    this.canvas.addEventListener("mouseleave", this.onPointerLeave);
-    this.canvas.addEventListener("dblclick", this.onDoubleClick);
+    const pointerOptions = { passive: false };
+    if (window.PointerEvent) {
+      this.canvas.addEventListener("pointerdown", this.onPointerDown, pointerOptions);
+      this.canvas.addEventListener("pointermove", this.onPointerMove, pointerOptions);
+      this.canvas.addEventListener("pointerup", this.onPointerUp, pointerOptions);
+      this.canvas.addEventListener("pointercancel", this.onPointerLeave, pointerOptions);
+      this.canvas.addEventListener("pointerleave", this.onPointerLeave, pointerOptions);
+      this.canvas.addEventListener("mouseleave", this.onPointerLeave);
+      this.canvas.addEventListener("dblclick", this.onDoubleClick);
+    } else {
+      // Fallback for very old browsers without PointerEvent support.
+      this.canvas.addEventListener("mousedown", this.onPointerDown);
+      this.canvas.addEventListener("mousemove", this.onPointerMove);
+      this.canvas.addEventListener("mouseup", this.onPointerUp);
+      this.canvas.addEventListener("mouseleave", this.onPointerLeave);
+      this.canvas.addEventListener("dblclick", this.onDoubleClick);
+      this.canvas.addEventListener("click", this.onCanvasClick);
+    }
     window.addEventListener("keydown", this.onKeyDown);
   }
 
   resizeCanvas() {
-    const { innerWidth, innerHeight } = window;
-    const fitScale = Math.min(innerWidth / this.baseWidth, innerHeight / this.baseHeight) || 1;
-    const minScale = Math.max(720 / this.baseHeight, 1);
-    const scale = Math.max(fitScale, minScale);
+    // Fit the fixed game coordinate system into the current viewport while keeping aspect ratio.
+    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
+    const viewportHeight = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+    const rect = this.canvas.getBoundingClientRect();
+    const availableWidth = rect.width || viewportWidth || this.baseWidth;
+    const availableHeight = rect.height || viewportHeight || this.baseHeight;
+    const fitScale = Math.min(availableWidth / this.baseWidth, availableHeight / this.baseHeight) || 1;
+    const scale = Math.max(fitScale, 0.25);
     this.scale = scale;
 
     const displayWidth = this.baseWidth * scale;
     const displayHeight = this.baseHeight * scale;
-    this.offsetX = (innerWidth - displayWidth) / 2;
-    this.offsetY = (innerHeight - displayHeight) / 2;
+    this.offsetX = (availableWidth - displayWidth) / 2;
+    this.offsetY = (availableHeight - displayHeight) / 2;
 
-    this.canvas.width = innerWidth;
-    this.canvas.height = innerHeight;
+    this.canvas.width = availableWidth;
+    this.canvas.height = availableHeight;
     this.ctx.imageSmoothingEnabled = false;
 
     const style = this.canvas.style;
-    style.width = `${innerWidth}px`;
-    style.height = `${innerHeight}px`;
-    style.position = "absolute";
+    style.width = `${availableWidth}px`;
+    style.height = `${availableHeight}px`;
+    style.position = "relative";
     style.left = "0px";
     style.top = "0px";
+
+    console.debug("[layout] resize applied");
+    if (window.DEBUG_LAYOUT) {
+      // Quick insight into responsive sizing on desktop and mobile.
+      console.info("[layout] resize", {
+        availableWidth: Math.round(availableWidth),
+        availableHeight: Math.round(availableHeight),
+        displayWidth: Math.round(displayWidth),
+        displayHeight: Math.round(displayHeight),
+        scale: Number(this.scale.toFixed(3)),
+        offsetX: Math.round(this.offsetX),
+        offsetY: Math.round(this.offsetY),
+      });
+    }
   }
 
   connectWebSocket() {
@@ -265,6 +296,10 @@ export class App {
 
   onCanvasClick(event) {
     const point = this.getPointer(event);
+    this.handleUiButtons(point);
+  }
+
+  handleUiButtons(point) {
     if (this.view === VIEW_MENU) {
       this.menuButtons.forEach((button) => {
         if (button.contains(point)) {
@@ -281,17 +316,29 @@ export class App {
   }
 
   onPointerDown(event) {
+    if (event.pointerType === "touch" && event.cancelable) {
+      event.preventDefault();
+    }
     if (this.view !== VIEW_PLAYING || !this.activeMode) return;
     this.activeMode.onPointerDown(this.getPointer(event));
   }
 
   onPointerMove(event) {
+    if (event.pointerType === "touch" && event.cancelable) {
+      event.preventDefault();
+    }
     if (this.view !== VIEW_PLAYING || !this.activeMode) return;
     this.activeMode.onPointerMove(this.getPointer(event));
   }
 
   onPointerUp(event) {
-    if (this.view !== VIEW_PLAYING || !this.activeMode) return;
+    if (event.pointerType === "touch" && event.cancelable) {
+      event.preventDefault();
+    }
+    if (this.view !== VIEW_PLAYING || !this.activeMode) {
+      this.onCanvasClick(event);
+      return;
+    }
     this.activeMode.onPointerUp(this.getPointer(event));
   }
 
@@ -324,9 +371,27 @@ export class App {
   }
 
   getPointer(event) {
+    // Map pointer/touch coordinates into game units respecting the current scale and offsets.
+    const touch = event?.changedTouches?.[0] || event?.touches?.[0];
+    const clientX = touch?.clientX ?? event.clientX ?? 0;
+    const clientY = touch?.clientY ?? event.clientY ?? 0;
+    if ((event.pointerType === "touch" || touch) && event.cancelable) {
+      event.preventDefault();
+    }
     const rect = this.canvas.getBoundingClientRect();
-    const x = (event.clientX - rect.left - this.offsetX) / this.scale;
-    const y = (event.clientY - rect.top - this.offsetY) / this.scale;
+    const x = (clientX - rect.left - this.offsetX) / this.scale;
+    const y = (clientY - rect.top - this.offsetY) / this.scale;
+
+    if (window.DEBUG_LAYOUT) {
+      console.log("[layout] pointer", {
+        clientX: Math.round(clientX),
+        clientY: Math.round(clientY),
+        canvasX: Number(x.toFixed(2)),
+        canvasY: Number(y.toFixed(2)),
+        scale: Number(this.scale.toFixed(3)),
+      });
+    }
+
     return { x, y };
   }
 
