@@ -4,6 +4,18 @@ import { EuchreMode } from "./modes/euchreMode.js";
 
 const BASE_WIDTH = 1100;
 const BASE_HEIGHT = 700;
+const MOBILE_ROTATE_BREAKPOINT = 900;
+const DOUBLE_TAP_MAX_DELAY = 320;
+const DOUBLE_TAP_MAX_DISTANCE = 32;
+const JOIN_BUTTON_WIDTH = 100;
+const JOIN_BUTTON_HEIGHT = 60;
+const JOIN_BUTTON_GAP = 15;
+const JOIN_KEYPAD_LAYOUT = [
+  ["1", "2", "3"],
+  ["4", "5", "6"],
+  ["7", "8", "9"],
+  ["Cancel", "0", "Delete"],
+];
 
 const VIEW_MENU = "menu";
 const VIEW_JOIN = "joinInput";
@@ -30,6 +42,13 @@ export class App {
     this.scale = 1;
     this.offsetX = 0;
     this.offsetY = 0;
+    this.pixelRatio = window.devicePixelRatio || 1;
+    this.lastTouchTap = { time: 0, x: 0, y: 0 };
+    this.rotateViewport = false;
+    this.canvasCssWidth = this.baseWidth;
+    this.canvasCssHeight = this.baseHeight;
+    this.viewportWidth = this.baseWidth;
+    this.viewportHeight = this.baseHeight;
 
     this.view = VIEW_MENU;
     this.mode = "solitaire";
@@ -66,6 +85,10 @@ export class App {
     this.connectWebSocket();
     this.attachEvents();
     window.addEventListener("resize", this.resizeCanvas);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", this.resizeCanvas);
+      window.visualViewport.addEventListener("scroll", this.resizeCanvas);
+    }
     if (window.DEBUG_LAYOUT === undefined) {
       window.DEBUG_LAYOUT = false;
     }
@@ -95,30 +118,77 @@ export class App {
 
   resizeCanvas() {
     // Fit the fixed game coordinate system into the current viewport while keeping aspect ratio.
-    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
-    const viewportHeight = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
-    const rect = this.canvas.getBoundingClientRect();
-    const availableWidth = rect.width || viewportWidth || this.baseWidth;
-    const availableHeight = rect.height || viewportHeight || this.baseHeight;
-    const fitScale = Math.min(availableWidth / this.baseWidth, availableHeight / this.baseHeight) || 1;
-    const scale = Math.max(fitScale, 0.25);
-    this.scale = scale;
+    const visualViewport = window.visualViewport;
+    const viewportWidth = Math.max(
+      visualViewport?.width ?? 0,
+      window.innerWidth || 0,
+      document.documentElement?.clientWidth || 0,
+    );
+    const viewportHeight = Math.max(
+      visualViewport?.height ?? 0,
+      window.innerHeight || 0,
+      document.documentElement?.clientHeight || 0,
+    );
+    const cssWidth = viewportWidth || this.baseWidth;
+    const cssHeight = viewportHeight || this.baseHeight;
+    this.viewportWidth = cssWidth;
+    this.viewportHeight = cssHeight;
+    const shouldRotate = cssHeight > cssWidth && cssWidth < MOBILE_ROTATE_BREAKPOINT;
+    this.rotateViewport = shouldRotate;
 
-    const displayWidth = this.baseWidth * scale;
-    const displayHeight = this.baseHeight * scale;
+    const availableWidth = shouldRotate ? cssHeight : cssWidth;
+    const availableHeight = shouldRotate ? cssWidth : cssHeight;
+    this.canvasCssWidth = availableWidth;
+    this.canvasCssHeight = availableHeight;
+
+    const fitScale = Math.min(availableWidth / this.baseWidth, availableHeight / this.baseHeight) || 1;
+    this.scale = Math.max(fitScale, 0.25);
+
+    const displayWidth = this.baseWidth * this.scale;
+    const displayHeight = this.baseHeight * this.scale;
     this.offsetX = (availableWidth - displayWidth) / 2;
     this.offsetY = (availableHeight - displayHeight) / 2;
 
-    this.canvas.width = availableWidth;
-    this.canvas.height = availableHeight;
+    this.pixelRatio = Math.min(window.devicePixelRatio || 1, 3);
+    const pixelWidth = Math.round(availableWidth * this.pixelRatio);
+    const pixelHeight = Math.round(availableHeight * this.pixelRatio);
+    if (this.canvas.width !== pixelWidth) {
+      this.canvas.width = pixelWidth;
+    }
+    if (this.canvas.height !== pixelHeight) {
+      this.canvas.height = pixelHeight;
+    }
     this.ctx.imageSmoothingEnabled = false;
 
     const style = this.canvas.style;
     style.width = `${availableWidth}px`;
     style.height = `${availableHeight}px`;
-    style.position = "relative";
-    style.left = "0px";
-    style.top = "0px";
+    style.position = "fixed";
+    const viewportOffsetX = visualViewport?.offsetLeft ?? 0;
+    const viewportOffsetY = visualViewport?.offsetTop ?? 0;
+    const viewportWidthCurrent = visualViewport?.width ?? cssWidth;
+    const viewportHeightCurrent = visualViewport?.height ?? cssHeight;
+    const viewportCenterX = viewportOffsetX + viewportWidthCurrent / 2;
+    const viewportCenterY = viewportOffsetY + viewportHeightCurrent / 2;
+    if (shouldRotate) {
+      const left = viewportCenterX - (availableWidth / 2);
+      const top = viewportCenterY - (availableHeight / 2);
+      style.left = `${left}px`;
+      style.top = `${top}px`;
+      style.right = "";
+      style.bottom = "";
+      style.transformOrigin = "center center";
+      style.transform = "rotate(90deg)";
+    } else {
+      const left = viewportCenterX - (availableWidth / 2);
+      const top = viewportCenterY - (availableHeight / 2);
+      style.left = `${left}px`;
+      style.top = `${top}px`;
+      style.right = "";
+      style.bottom = "";
+      style.transformOrigin = "top left";
+      style.transform = "none";
+    }
 
     console.debug("[layout] resize applied");
     if (window.DEBUG_LAYOUT) {
@@ -126,6 +196,7 @@ export class App {
       console.info("[layout] resize", {
         availableWidth: Math.round(availableWidth),
         availableHeight: Math.round(availableHeight),
+        rotated: shouldRotate,
         displayWidth: Math.round(displayWidth),
         displayHeight: Math.round(displayHeight),
         scale: Number(this.scale.toFixed(3)),
@@ -238,20 +309,50 @@ export class App {
     this.menuButtons = [createButton, joinButton];
   }
 
+  getJoinLayoutMetrics() {
+    const buttonWidth = JOIN_BUTTON_WIDTH;
+    const buttonHeight = JOIN_BUTTON_HEIGHT;
+    const gap = JOIN_BUTTON_GAP;
+    const joinWidth = (buttonWidth * 3) + (gap * 2);
+    const startX = this.width / 2 - (joinWidth / 2);
+    const keypadRows = JOIN_KEYPAD_LAYOUT.length;
+    const keypadHeight = (keypadRows + 1) * buttonHeight + keypadRows * gap;
+    const titleY = Math.max(60, this.height * 0.15);
+    const codeBoxCenterY = Math.max(titleY + 60, this.height * 0.28);
+    const instructionsBase = Math.max(codeBoxCenterY + 40, this.height * 0.35);
+    const instructionsMax = this.height - keypadHeight - 80;
+    let instructionsY = Math.min(instructionsBase, instructionsMax);
+    if (!Number.isFinite(instructionsY)) {
+      instructionsY = instructionsBase;
+    }
+    const keypadStartMin = instructionsY + 40;
+    const keypadStartCentered = ((this.height - keypadHeight) / 2) + 20;
+    const keypadStartMax = this.height - keypadHeight - 10;
+    const startY = Math.max(
+      120,
+      Math.min(Math.max(keypadStartMin, keypadStartCentered), keypadStartMax),
+    );
+
+    return {
+      layout: JOIN_KEYPAD_LAYOUT,
+      buttonWidth,
+      buttonHeight,
+      gap,
+      startX,
+      startY,
+      joinWidth,
+      titleY,
+      codeBoxCenterY,
+      instructionsY,
+    };
+  }
+
   setupJoinButtons() {
     this.joinButtons = [];
-    const buttonWidth = 100;
-    const buttonHeight = 60;
-    const gap = 15;
-    const startX = this.width / 2 - ((buttonWidth * 3) + (gap * 2)) / 2;
-    const startY = this.height / 2 + 10;
-
-    const layout = [
-      ["1", "2", "3"],
-      ["4", "5", "6"],
-      ["7", "8", "9"],
-      ["Cancel", "0", "Delete"],
-    ];
+    const metrics = this.getJoinLayoutMetrics();
+    const {
+      layout, buttonWidth, buttonHeight, gap, startX, startY, joinWidth,
+    } = metrics;
 
     layout.forEach((row, rowIndex) => {
       row.forEach((label, colIndex) => {
@@ -276,7 +377,6 @@ export class App {
       });
     });
 
-    const joinWidth = (buttonWidth * 3) + (gap * 2);
     const joinY = startY + layout.length * (buttonHeight + gap);
     this.joinButtons.push(new Button("Join", startX, joinY, joinWidth, buttonHeight, () => {
       if (this.roomCode.length === 4) {
@@ -339,12 +439,35 @@ export class App {
       this.onCanvasClick(event);
       return;
     }
-    this.activeMode.onPointerUp(this.getPointer(event));
+    const point = this.getPointer(event);
+    this.activeMode.onPointerUp(point);
+    if (this.shouldTriggerDoubleTap(event, point)) {
+      this.activeMode.onDoubleClick(point);
+    }
   }
 
   onPointerLeave() {
     if (this.view !== VIEW_PLAYING || !this.activeMode) return;
     this.activeMode.onPointerLeave();
+  }
+
+  shouldTriggerDoubleTap(event, point) {
+    const isTouchPointer = event.pointerType === "touch";
+    if (!isTouchPointer || !point) {
+      this.lastTouchTap.time = 0;
+      return false;
+    }
+    const now = (window.performance?.now ? window.performance.now() : Date.now());
+    const elapsed = now - (this.lastTouchTap.time || 0);
+    const dx = point.x - this.lastTouchTap.x;
+    const dy = point.y - this.lastTouchTap.y;
+    const distanceSq = dx * dx + dy * dy;
+    if (elapsed > 0 && elapsed <= DOUBLE_TAP_MAX_DELAY && distanceSq <= DOUBLE_TAP_MAX_DISTANCE ** 2) {
+      this.lastTouchTap.time = 0;
+      return true;
+    }
+    this.lastTouchTap = { time: now, x: point.x, y: point.y };
+    return false;
   }
 
   onDoubleClick(event) {
@@ -378,9 +501,22 @@ export class App {
     if ((event.pointerType === "touch" || touch) && event.cancelable) {
       event.preventDefault();
     }
+    let x;
+    let y;
     const rect = this.canvas.getBoundingClientRect();
-    const x = (clientX - rect.left - this.offsetX) / this.scale;
-    const y = (clientY - rect.top - this.offsetY) / this.scale;
+    if (this.rotateViewport) {
+      const centerX = rect.left + (rect.width / 2);
+      const centerY = rect.top + (rect.height / 2);
+      const dx = clientX - centerX;
+      const dy = clientY - centerY;
+      const localX = dy + (this.canvasCssWidth / 2);
+      const localY = -dx + (this.canvasCssHeight / 2);
+      x = (localX - this.offsetX) / this.scale;
+      y = (localY - this.offsetY) / this.scale;
+    } else {
+      x = (clientX - rect.left - this.offsetX) / this.scale;
+      y = (clientY - rect.top - this.offsetY) / this.scale;
+    }
 
     if (window.DEBUG_LAYOUT) {
       console.log("[layout] pointer", {
@@ -389,6 +525,7 @@ export class App {
         canvasX: Number(x.toFixed(2)),
         canvasY: Number(y.toFixed(2)),
         scale: Number(this.scale.toFixed(3)),
+        rotated: this.rotateViewport,
       });
     }
 
@@ -399,6 +536,7 @@ export class App {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.scale(this.pixelRatio, this.pixelRatio);
     ctx.translate(this.offsetX, this.offsetY);
     ctx.scale(this.scale, this.scale);
 
@@ -440,6 +578,7 @@ export class App {
 
   renderJoin() {
     const { ctx, width: W, height: H } = this;
+    const joinLayout = this.getJoinLayoutMetrics();
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = "#222";
     ctx.fillRect(0, 0, W, H);
@@ -448,18 +587,22 @@ export class App {
     ctx.font = "32px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("Enter Table Code:", W / 2, H / 2 - 60);
+    ctx.fillText("Enter Table Code:", W / 2, joinLayout.titleY);
 
     ctx.strokeStyle = "#fff";
     ctx.lineWidth = 2;
-    ctx.strokeRect(W / 2 - 120, H / 2 - 30, 240, 60);
+    const codeBoxWidth = 260;
+    const codeBoxHeight = 70;
+    const codeBoxX = W / 2 - codeBoxWidth / 2;
+    const codeBoxY = joinLayout.codeBoxCenterY - codeBoxHeight / 2;
+    ctx.strokeRect(codeBoxX, codeBoxY, codeBoxWidth, codeBoxHeight);
 
     ctx.font = "36px monospace";
     const paddedCode = clampRoomCode(this.roomCode.padEnd(4, "_")).split("").join(" ");
-    ctx.fillText(paddedCode, W / 2, H / 2);
+    ctx.fillText(paddedCode, W / 2, joinLayout.codeBoxCenterY);
 
     ctx.font = "18px sans-serif";
-    ctx.fillText("Tap the keypad (4 digits) then press ENTER or Join", W / 2, H / 2 + 80);
+    ctx.fillText("Tap the keypad (4 digits) then press ENTER or Join", W / 2, joinLayout.instructionsY);
 
     this.joinButtons.forEach((button) => button.draw(ctx));
   }
